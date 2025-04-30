@@ -4,6 +4,7 @@ import time
 import configparser
 import requests
 import openai
+import threading
 
 class ConfigLoader:
     def __init__(self, path='chat.conf'):
@@ -47,15 +48,15 @@ class ConfigLoader:
 
 class IRCClient:
     def __init__(self, config: dict):
-        self.server = config['server']
-        self.port = config['port']
-        self.usessl = config['ssl']
-        self.channels = config['channels']
-        self.nickname = config['nickname']
-        self.ident = config['ident']
-        self.realname = config['realname']
-        self.password = config['password']
-        self.socket = None
+        self.server: str = config['server']
+        self.port: str = config['port']
+        self.usessl: bool = config['ssl']
+        self.channels: list[str] = config['channels']
+        self.nickname: str = config['nickname']
+        self.ident: str = config['ident']
+        self.realname: str = config['realname']
+        self.password: str = config['password']
+        self.socket: socket = None
 
     def connect(self):
         while True:
@@ -95,16 +96,16 @@ class IRCClient:
 
 class LLMClient:
     def __init__(self, config: dict, local_config: dict):
-        self.use_local = local_config['use_local_server']
-        self.context = config['context']
-        self.model = config['model']
-        self.messages = [{'role': 'system', 'content': self.context}]
-        self.temperature = config['temperature']
-        self.max_tokens = config['max_tokens']
-        self.top_p = config['top_p']
-        self.freq_penalty = config['frequency_penalty']
-        self.pres_penalty = config['presence_penalty']
-        self.timeout = config['request_timeout']
+        self.use_local: bool = local_config['use_local_server']
+        self.context: str = config['context']
+        self.model: str = config['model']
+        self.messages: list[dict[str:str]] = [{'role': 'system', 'content': self.context}]
+        self.temperature: float = config['temperature']
+        self.max_tokens: int = config['max_tokens']
+        self.top_p: int = config['top_p']
+        self.freq_penalty: int = config['frequency_penalty']
+        self.pres_penalty: int = config['presence_penalty']
+        self.timeout: int = config['request_timeout']
 
         if not self.use_local:
             openai.api_key = config['api_key']
@@ -166,6 +167,11 @@ class MessageHandler:
     def __init__(self, irc_client: IRCClient, llm_client: LLMClient):
         self.irc = irc_client
         self.llm = llm_client
+    
+    def send_typing_active(self, channel: str, stop_event):
+      while not stop_event.is_set():
+          self.irc.send(f"@+typing=active TAGMSG {channel}")
+          stop_event.wait(5)
 
     def handle(self, line: str):
         if line.startswith("PING"):
@@ -180,9 +186,17 @@ class MessageHandler:
             question = line.split(f":{self.irc.nickname}:", 1)[1].strip()
             tag_dict = dict(tag.split("=", 1) for tag in parts[0][2:].split(" ", 1)[0].split(";") if "=" in tag)
             msgid = tag_dict.get("draft/reply") or tag_dict.get("msgid")
-            
-            self.irc.send(f"@+typing=active TAGMSG {channel}")
+
+            # send "typing" event every 5 seconds
+            stop_typing = threading.Event()
+            typing_thread = threading.Thread(target=self.send_typing_active, args=(channel, stop_typing))
+            typing_thread.start()
+
             responses = self.llm.ask(username, question)
+
+            # halt typing event and send typing=done
+            stop_typing.set()
+            typing_thread.join()
             self.irc.send(f"@+typing=done TAGMSG {channel}")
 
             for response in responses:
@@ -200,9 +214,9 @@ class MessageHandler:
 class Bot:
     def __init__(self):
         self.config_loader = ConfigLoader()
-        irc_config = self.config_loader.get_irc_config()
-        openai_config = self.config_loader.get_openai_config()
-        local_config = self.config_loader.get_local_server_config()
+        irc_config: dict = self.config_loader.get_irc_config()
+        openai_config: dict = self.config_loader.get_openai_config()
+        local_config: dict = self.config_loader.get_local_server_config()
 
         self.irc = IRCClient(irc_config)
         self.llm = LLMClient(openai_config, local_config)
