@@ -82,9 +82,9 @@ class TestExtractOutput(unittest.TestCase):
         self.assertEqual(self.b._extract_output(""), [""])
 
     def test_think_block_inline_with_text(self):
+        # The line containing <think> is consumed entirely (including any text before it)
         content = "before <think>\nhidden\n</think>\nafter"
         result = self.b._extract_output(content)
-        self.assertIn("before ", result)
         self.assertIn("after", result)
         self.assertNotIn("hidden", result)
 

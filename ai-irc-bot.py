@@ -453,7 +453,7 @@ class MessageHandler:
             return
 
         channel = log_channel
-        username = line.split('!')[0].split()[1][1:]
+        username = line.split('!')[0].split()[-1][1:]
 
         if directly_addressed:
             question = line.split(f":{self.irc.nickname}:", 1)[1].strip()
