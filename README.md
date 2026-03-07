@@ -1,110 +1,113 @@
-# ChatGPT IRC Bot
-ChatGPT IRC bot is a simple IRC bot written in Python. It connects to OpenAI endpoints to answer questions or generate images.
+# ircchatgpt
 
-ChatGPT IRC Bot uses official bindings from OpenAI to interact with the API through HTTP requests:
-https://platform.openai.com/docs/api-reference
+An IRC bot that connects to LLM APIs (Gemini, OpenAI, or local servers) to answer
+questions in IRC channels. Mention the bot's nickname to get a response.
 
-### Prerequisities:
+## Prerequisites
 
-Create an account and obtain your API key: https://platform.openai.com/account/api-keys
+- [Podman](https://podman.io/getting-started/installation) (recommended) or [Docker](https://docs.docker.com/get-docker/)
+- A [Gemini API key](https://aistudio.google.com/app/apikey) (free tier is sufficient)
 
-Install python3 and the official Python bindings:
-```
-$ apt install python3 python3-pip (Debian/Ubuntu)
-$ yum install python3 python3-pip (RedHat/CentOS)
-$ pip3 install openai==0.28 pyshorteners
-$ git clone https://github.com/knrd1/chatgpt.git
-$ cd chatgpt
-$ cp example-chat.conf chat.conf
-```
-### Configuration:
+## Configuration
 
-Edit chat.conf and change variables. Example configuration for IRCNet:
+Copy the example config and fill in your details:
 
-Variable "context" is optional: you can leave it blank or enter what you want the bot to know and how you want the bot to behave. This will work only with models connecting to endpoint /v1/chat/completions
+    cp example-chat.conf chat.conf
 
-```
-[openai]
-api_key = sk-XXXXXXXXXXXXXXX
+Edit `chat.conf` — minimum required fields:
 
-[chatcompletion]
-model = gpt-3.5-turbo
-role = user
-context = You are a helpful and friendly bot on IRC channel #linux.
-temperature = 0.8
-max_tokens = 1000
-top_p = 1
-frequency_penalty = 0
-presence_penalty = 0
-request_timeout = 60
+| Section | Key | Description |
+|---------|-----|-------------|
+| `[provider]` | `backend` | `gemini`, `openai`, or `local` |
+| `[gemini]` | `api_key` | Your Gemini API key |
+| `[gemini]` | `model` | e.g. `gemma-3-27b-it` |
+| `[irc]` | `server` | IRC server hostname |
+| `[irc]` | `channels` | Comma-separated channel list |
+| `[irc]` | `nickname` | Bot's IRC nickname |
 
-[irc]
-server = open.ircnet.net
-port = 6667
-ssl = false
-channels = #linux,#github
-nickname = MyBot
-ident = mybot
-realname = My Bot
-password = 
-```
-### Connecting bot to IRC server:
-```
-$ python3 chatgpt.py
-```
-Use screen to run bot in the background and keep it running even after you log out of your session:
-```
-$ screen python3 chatgpt.py
-```
-To detach from the screen session (leaving your ChatGPT IRC Bot running in the background), press Ctrl + A followed by d (for "detach").
-If you need to reattach to the screen session later, use the following command:
-```
-screen -r
-```
-### Interaction:
-ChatGPT IRC Bot will interact only if you mention its nickname:
-```
-10:31:12 <@knrd1> ChatGPT: hello, how are you?
-10:31:14 < ChatGPT> Hi there, I'm doing well, thank you. How about you?
-10:35:56 <@knrd1> ChatGPT: do you like IRC?
-10:35:59 < ChatGPT> Yes, I like IRC. It is a great way to communicate with people from around the world.
+See `example-chat.conf` for all available options.
 
-```
-If you set the model to "dall-e-2" or "dall-e-3", the ChatGPT IRC Bot will return a shortened URL to the generated image:
-```
-17:33:16 <@knrd1> ChatGPT: impressionist style painting: two horses dancing on the street
-17:33:23 < ChatGPT> https://tinyurl.com/2hr5uf4w
-```
-### Model endpoint compatibility
+## Running with Podman (recommended)
 
-ChatGPT IRC Bot can use three API endpoints: 
+Podman runs rootless with no background daemon — ideal for Linux and WSL2.
 
-Following models support endpoint /v1/chat/completions:
+    # Install on Ubuntu/Debian (including WSL)
+    sudo apt install podman
 
-> gpt-4o, gpt-4, gpt-4-turbo, gpt-4-turbo-preview, gpt-3.5-turbo
+    # Build
+    podman build -t ircchatgpt .
 
-Models that support /v1/completions (Legacy):
+    # Run (foreground)
+    podman run -it --rm -v $(pwd)/chat.conf:/app/chat.conf ircchatgpt
 
-> gpt-3.5-turbo-instruct, babbage-002, davinci-002
+    # Run in background
+    podman run -d --name ircchatgpt --restart unless-stopped \
+      -v $(pwd)/chat.conf:/app/chat.conf ircchatgpt
 
-Create an image using endpoint /v1/images/generations:
+## Running with Docker
 
-> dall-e-2, dall-e-3
+    docker build -t ircchatgpt .
+    docker run -it --rm -v $(pwd)/chat.conf:/app/chat.conf ircchatgpt
 
-More details about models: https://platform.openai.com/docs/models
+    # Background
+    docker run -d --name ircchatgpt --restart unless-stopped \
+      -v $(pwd)/chat.conf:/app/chat.conf ircchatgpt
 
-### Docker
+## Interaction
 
-To build the Docker image, you can use the following command:
-```
-docker build -t my-chatgpt-app .
-```
-To run the Docker container, you can use the following command:
-```
-docker run -it my-chatgpt-app
-```
-To detach from a running Docker, press Ctrl + P. While holding down Ctrl, press Q.
-To reattach to the container later, use the following command:
-```
-docker attach <container_id>
-```
+The bot responds when you mention its nickname in a channel:
+
+    10:31:12 <knrd1> MyBot: hello, how are you?
+    10:31:14 <MyBot> Hi! I'm doing well, thanks. How about you?
+
+    10:35:56 <knrd1> MyBot: what is the capital of Brazil?
+    10:35:59 <MyBot> The capital of Brazil is Brasília.
+
+To reset the conversation history for the current channel:
+
+    <knrd1> MyBot: clear chat
+
+## Configuration Reference
+
+### [provider]
+| Key | Values | Default |
+|-----|--------|---------|
+| `backend` | `gemini` \| `openai` \| `local` | `gemini` |
+
+### [gemini]
+| Key | Description |
+|-----|-------------|
+| `api_key` | Gemini API key from Google AI Studio |
+| `model` | Model name (e.g. `gemma-3-27b-it`) |
+| `context` | System prompt for the bot's personality |
+| `max_output_tokens` | Max tokens in response (default: `1000`) |
+| `temperature` | Randomness 0.0–1.0 (default: `0.8`) |
+
+### [openai]
+| Key | Description |
+|-----|-------------|
+| `api_key` | OpenAI API key |
+| `model` | Model name (e.g. `gpt-4o-mini`) |
+| `context` | System prompt |
+| `max_tokens` | Max tokens in response |
+| `temperature` | Randomness 0.0–1.0 |
+
+### [localserver]
+| Key | Description |
+|-----|-------------|
+| `target_ip` | Local server IP (e.g. `127.0.0.1`) |
+| `local_port` | Port (e.g. `55511`) |
+| `mapping` | API path (e.g. `/v1/chat/completions`) |
+| `context` | System prompt |
+
+### [irc]
+| Key | Description |
+|-----|-------------|
+| `server` | IRC server hostname |
+| `port` | Port (default: `6667`) |
+| `ssl` | `true` or `false` |
+| `channels` | Comma-separated list (e.g. `#linux,#chat`) |
+| `nickname` | Bot's nick |
+| `ident` | Ident string |
+| `realname` | Real name string |
+| `password` | Server password (leave blank if none) |

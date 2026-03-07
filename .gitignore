@@ -1,2 +1,6 @@
 chatgpt_dev.py
 chat.conf
+llm/
+__pycache__/
+*.pyc
+*.pyo

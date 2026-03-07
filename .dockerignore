@@ -1,0 +1,11 @@
+llm/
+.git/
+__pycache__/
+*.pyc
+*.pyo
+chat.conf
+.claude/
+_bmad/
+_bmad-output/
+PLANNING.md
+AGENTS.md
