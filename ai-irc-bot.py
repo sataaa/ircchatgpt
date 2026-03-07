@@ -17,6 +17,7 @@ logging.basicConfig(
     format='%(asctime)s %(levelname)s %(message)s'
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("google_genai.client").setLevel(logging.WARNING)
 
 class ConfigLoader:
     def __init__(self, path='chat.conf'):
