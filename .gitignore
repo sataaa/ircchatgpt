@@ -4,3 +4,8 @@ llm/
 __pycache__/
 *.pyc
 *.pyo
+.claude/
+_bmad/
+_bmad-output/
+AGENTS.md
+PLANNING.md
