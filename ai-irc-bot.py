@@ -518,4 +518,13 @@ class Bot:
 
 
 if __name__ == "__main__":
-    Bot().run()
+    bot = Bot()
+    try:
+        bot.run()
+    except Exception as e:
+        logger.critical("Fatal error: %s", e, exc_info=True)
+        try:
+            bot.irc.send(f"QUIT :{type(e).__name__}: {e}")
+        except Exception:
+            pass
+        raise
