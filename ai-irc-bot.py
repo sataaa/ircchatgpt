@@ -1,3 +1,4 @@
+import os
 import re
 import socket
 import ssl
@@ -132,11 +133,14 @@ class IRCClient:
 
 
 class BaseLLMBackend:
-    def ask(self, channel: str, username: str, question: str) -> list[str]:
+    def ask(self, channel: str, username: str, question: str, send_fn=None) -> list[str]:
         raise NotImplementedError
 
     def clear(self, channel: str) -> None:
         raise NotImplementedError
+
+    def log_channel_message(self, channel: str, username: str, message: str) -> None:
+        pass
 
     def _extract_output(self, content: str) -> list[str]:
         output, thought, inside_think = [], [], False
@@ -160,6 +164,7 @@ class GeminiBackend(BaseLLMBackend):
         self.client = genai.Client(api_key=self.api_key)
         self.model_name = config['model']
         self.tools_config = tools_config
+        os.makedirs("tmp", exist_ok=True)
 
         context = config['context']
         tool_instructions = []
@@ -170,7 +175,7 @@ class GeminiBackend(BaseLLMBackend):
         if tools_config.get('enable_image_generation') and tools_config.get('imgbb_api_key'):
             tool_instructions.append("to generate an image, output exactly: <image your prompt>")
         if tool_instructions:
-            context += ". " + "; ".join(tool_instructions) + ". output only the tag, nothing else, when calling a tool"
+            context += ". " + "; ".join(tool_instructions) + ". output only the tag, nothing else, when calling a tool. after using a tool result, briefly mention you looked it up"
 
         self.context = context
         self.generation_config = types.GenerateContentConfig(
@@ -178,6 +183,77 @@ class GeminiBackend(BaseLLMBackend):
             max_output_tokens=config['max_output_tokens'],
         )
         self.sessions: dict = {}  # channel -> Chat
+
+    def _log_path(self, channel: str) -> str:
+        return f"tmp/{channel}.log"
+
+    def _ctx_path(self, channel: str) -> str:
+        return f"tmp/{channel}.ctx"
+
+    def _cursor_path(self, channel: str) -> str:
+        return f"tmp/{channel}.cursor"
+
+    def log_channel_message(self, channel: str, username: str, message: str) -> None:
+        log_path = self._log_path(channel)
+        with open(log_path, 'a') as f:
+            f.write(f"{username}: {message}\n")
+        with open(log_path) as f:
+            lines = f.readlines()
+        if len(lines) > 1000:
+            with open(log_path, 'w') as f:
+                f.writelines(lines[-1000:])
+
+    def _update_channel_context(self, channel: str, session, send_fn=None) -> str:
+        log_path = self._log_path(channel)
+        ctx_path = self._ctx_path(channel)
+        cursor_path = self._cursor_path(channel)
+
+        if not os.path.exists(log_path):
+            return ""
+
+        with open(log_path) as f:
+            log_lines = f.readlines()
+
+        cursor = 0
+        if os.path.exists(cursor_path):
+            try:
+                cursor = int(open(cursor_path).read().strip())
+            except ValueError:
+                cursor = 0
+        if cursor >= len(log_lines):
+            cursor = max(0, len(log_lines) - 150)
+
+        diff = log_lines[cursor:]
+        if not diff:
+            return open(ctx_path).read().strip() if os.path.exists(ctx_path) else ""
+
+        if len(diff) > 150:
+            catchup = session.send_message(
+                "(you have a large backlog of channel messages to read before answering — "
+                "tell the channel you're catching up, one short sentence, stay in character)"
+            )
+            if send_fn:
+                send_fn(catchup.text.strip())
+            diff = diff[-150:]
+
+        ctx = open(ctx_path).read().strip() if os.path.exists(ctx_path) else ""
+        diff_text = "".join(diff).strip()
+
+        prompt = (
+            "Summarize this IRC channel conversation into a bullet list of max 10 short phrases. "
+            "Fade out older topics, emphasize recent ones. Output ONLY the bullet list, nothing else.\n\n"
+            f"Current context:\n{ctx}\n\nNew messages:\n{diff_text}"
+        )
+        summary = self.client.models.generate_content(model=self.model_name, contents=prompt)
+        new_ctx = summary.text.strip()
+
+        with open(ctx_path, 'w') as f:
+            f.write(new_ctx)
+        with open(cursor_path, 'w') as f:
+            f.write(str(len(log_lines)))
+
+        logger.info("Channel context updated for %s (%d new lines)", channel, len(diff))
+        return new_ctx
 
     def _get_session(self, channel: str):
         if channel not in self.sessions:
@@ -210,12 +286,18 @@ class GeminiBackend(BaseLLMBackend):
 
         return None
 
-    def ask(self, channel: str, username: str, question: str) -> list[str]:
+    def ask(self, channel: str, username: str, question: str, send_fn=None) -> list[str]:
         if question.strip().endswith("clear chat"):
             self.clear(channel)
             return ["cleared log"]
         session = self._get_session(channel)
-        response = session.send_message(f"<{username}> {question}")
+        ctx = self._update_channel_context(channel, session, send_fn)
+
+        msg = f"<{username}> {question}"
+        if ctx:
+            msg = f"[Channel context:\n{ctx}]\n\n{msg}"
+
+        response = session.send_message(msg)
 
         for _ in range(3):  # max 3 tool calls
             tool_result = self._handle_tool_tag(response.text)
@@ -356,13 +438,21 @@ class MessageHandler:
                 self.active_threads.add(incoming_msgid)
             return
 
+        # Log all incoming channel messages for context tracking
+        channel_idx = 3 if line.startswith("@") else 2
+        log_channel = parts[channel_idx]
+        log_username = line.split('!')[0].split()[-1].lstrip(':')
+        msg_split = line.split(f"PRIVMSG {log_channel} :", 1)
+        if len(msg_split) > 1:
+            self.llm.log_channel_message(log_channel, log_username, msg_split[1].strip())
+
         directly_addressed = f":{self.irc.nickname}:" in line
         in_bot_thread = reply_to is not None and reply_to in self.active_threads
 
         if not (directly_addressed or in_bot_thread):
             return
 
-        channel = parts[3]
+        channel = log_channel
         username = line.split('!')[0].split()[1][1:]
 
         if directly_addressed:
@@ -377,7 +467,10 @@ class MessageHandler:
         typing_thread = threading.Thread(target=self.send_typing_active, args=(channel, stop_typing))
         typing_thread.start()
 
-        responses = self.llm.ask(channel, username, question)
+        responses = self.llm.ask(
+            channel, username, question,
+            send_fn=lambda text: self.irc.send(f"PRIVMSG {channel} :{text}")
+        )
 
         # halt typing event and send typing=done
         stop_typing.set()
