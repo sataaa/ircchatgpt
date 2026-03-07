@@ -513,12 +513,31 @@ class Bot:
         self.llm = LLMClient(provider, provider_config, tools_config)
         self.handler = MessageHandler(self.irc, self.llm)
 
+    def _process_orders(self):
+        if not os.path.isdir("tmp"):
+            return
+        for fname in os.listdir("tmp"):
+            if not fname.endswith(".order"):
+                continue
+            order_path = os.path.join("tmp", fname)
+            channel = fname[:-6]  # strip ".order"
+            try:
+                with open(order_path) as f:
+                    message = f.read().strip()
+                os.remove(order_path)
+                if message:
+                    self.irc.send(f"PRIVMSG {channel} :{message}")
+                    logger.info("Custom order sent to %s", channel)
+            except Exception as e:
+                logger.warning("Failed to process order %s: %s", fname, e)
+
     def run(self):
         self.irc.connect()
         while True:
             for line in self.irc.receive():
                 logger.debug(line)
                 self.handler.handle(line)
+            self._process_orders()
             time.sleep(1)
 
 
