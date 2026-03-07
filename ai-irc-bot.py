@@ -33,7 +33,8 @@ class ConfigLoader:
             'nickname': self.config.get('irc', 'nickname'),
             'ident': self.config.get('irc', 'ident'),
             'realname': self.config.get('irc', 'realname'),
-            'password': self.config.get('irc', 'password')
+            'password': self.config.get('irc', 'password'),
+            'private_channels': {c.strip() for c in self.config.get('irc', 'private_channels', fallback='').split(',') if c.strip()}
         }
 
     def get_provider(self) -> str:
@@ -86,6 +87,7 @@ class IRCClient:
         self.ident: str = config['ident']
         self.realname: str = config['realname']
         self.password: str = config['password']
+        self.private_channels: set[str] = config.get('private_channels', set())
         self.socket: socket = None
         self._buffer: str = ""
         self.joined: bool = False
@@ -438,16 +440,18 @@ class MessageHandler:
                 self.active_threads.add(incoming_msgid)
             return
 
-        # Log all incoming channel messages for context tracking
         channel_idx = 3 if line.startswith("@") else 2
         log_channel = parts[channel_idx]
         log_username = line.split('!')[0].split()[-1].lstrip(':')
         msg_split = line.split(f"PRIVMSG {log_channel} :", 1)
-        if len(msg_split) > 1:
-            self.llm.log_channel_message(log_channel, log_username, msg_split[1].strip())
 
         directly_addressed = f":{self.irc.nickname}:" in line
         in_bot_thread = reply_to is not None and reply_to in self.active_threads
+
+        # In private channels only log messages directed at the bot;
+        # in normal channels log everything for context awareness.
+        if len(msg_split) > 1 and (log_channel not in self.irc.private_channels or directly_addressed or in_bot_thread):
+            self.llm.log_channel_message(log_channel, log_username, msg_split[1].strip())
 
         if not (directly_addressed or in_bot_thread):
             return
