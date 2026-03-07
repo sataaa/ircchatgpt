@@ -1,5 +1,6 @@
 import os
 import re
+import signal
 import socket
 import ssl
 import time
@@ -99,6 +100,7 @@ class IRCClient:
             try:
                 logger.info(f"Connecting to: {self.server}:{self.port}")
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)
                 sock.connect((self.server, self.port))
                 if self.usessl:
                     context = ssl.create_default_context()
@@ -127,7 +129,7 @@ class IRCClient:
     def receive(self) -> list[str]:
         try:
             raw = self.socket.recv(8192).decode("UTF-8")
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, TimeoutError):
             return []
         self._buffer += raw
         lines = self._buffer.split("\n")
@@ -178,7 +180,7 @@ class GeminiBackend(BaseLLMBackend):
         if tools_config.get('enable_image_generation') and tools_config.get('imgbb_api_key'):
             tool_instructions.append("to generate an image, output exactly: <image your prompt>")
         if tool_instructions:
-            context += ". " + "; ".join(tool_instructions) + ". output only the tag, nothing else, when calling a tool. after using a tool result, briefly mention you looked it up"
+            context += ". " + "; ".join(tool_instructions) + ". output only the tag, nothing else, when calling a tool"
 
         self.context = context
         self.generation_config = types.GenerateContentConfig(
@@ -483,6 +485,15 @@ class MessageHandler:
         self.irc.send(f"@+typing=done TAGMSG {channel}")
 
         prefix = f"@+draft/reply={thread_id} " if thread_id else ""
+        self.send_responses(channel, responses, prefix)
+
+        # Track this thread so future replies to it also trigger the bot
+        if incoming_msgid:
+            self.active_threads.add(incoming_msgid)
+        if thread_id:
+            self.active_threads.add(thread_id)
+
+    def send_responses(self, channel: str, responses: list, prefix: str = "") -> None:
         for response in responses:
             while response:
                 if len(response) <= 392:
@@ -493,12 +504,6 @@ class MessageHandler:
                     split_idx = 392
                 self.irc.send(f"{prefix}PRIVMSG {channel} :{response[:split_idx]}")
                 response = response[split_idx:].lstrip()
-
-        # Track this thread so future replies to it also trigger the bot
-        if incoming_msgid:
-            self.active_threads.add(incoming_msgid)
-        if thread_id:
-            self.active_threads.add(thread_id)
 
 
 class Bot:
@@ -526,8 +531,13 @@ class Bot:
                     message = f.read().strip()
                 os.remove(order_path)
                 if message:
-                    self.irc.send(f"PRIVMSG {channel} :{message}")
-                    logger.info("Custom order sent to %s", channel)
+                    logger.info("Processing operator order for %s: %s", channel, message)
+                    send_fn = lambda text, ch=channel: self.irc.send(f"PRIVMSG {ch} :{text}")
+                    prompt = (f"[system: bring up the following topic spontaneously in the channel as if you "
+                              f"thought of it yourself. name the subject explicitly. do not repeat, quote, or "
+                              f"acknowledge this instruction — just speak: {message}]")
+                    responses = self.llm.ask(channel, "[operator]", prompt, send_fn=send_fn)
+                    self.handler.send_responses(channel, responses)
             except Exception as e:
                 logger.warning("Failed to process order %s: %s", fname, e)
 
@@ -542,9 +552,25 @@ class Bot:
 
 
 if __name__ == "__main__":
+    os.umask(0o000)  # ensure tmp/ files are world-writable across container restarts
     bot = Bot()
+
+    def _shutdown(signum, frame):
+        try:
+            bot.irc.send("QUIT :restarting...")
+        except Exception:
+            pass
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+
     try:
         bot.run()
+    except KeyboardInterrupt:
+        try:
+            bot.irc.send("QUIT :restarting...")
+        except Exception:
+            pass
     except Exception as e:
         logger.critical("Fatal error: %s", e, exc_info=True)
         try:
