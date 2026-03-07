@@ -1,9 +1,9 @@
-llm/
 .git/
 __pycache__/
 *.pyc
 *.pyo
 chat.conf
+tmp/
 .claude/
 _bmad/
 _bmad-output/

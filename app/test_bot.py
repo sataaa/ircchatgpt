@@ -1,27 +1,19 @@
 """
-Unit tests for ai-irc-bot.py and tools.py.
+Unit tests for the ircchatgpt bot.
 
 Run inside the container or in an environment with requirements installed:
-    python -m pytest test_bot.py -v
+    python -m pytest app/test_bot.py -v
 """
 
-import importlib.util
 import os
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-# ---------------------------------------------------------------------------
-# Load the bot module from its hyphenated filename
-# ---------------------------------------------------------------------------
-_BOTFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai-irc-bot.py")
-_spec = importlib.util.spec_from_file_location("bot", _BOTFILE)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-
-BaseLLMBackend = _mod.BaseLLMBackend
-GeminiBackend = _mod.GeminiBackend
-MessageHandler = _mod.MessageHandler
+from app.src.llm.base import BaseLLMBackend
+from app.src.llm.gemini import GeminiBackend
+from app.src.handler import MessageHandler
+from app.src.context import ChannelContext
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -50,11 +42,12 @@ _TOOLS_ALL = {
 def make_backend(tools_config=None, tmpdir=None):
     cfg = tools_config if tools_config is not None else _TOOLS_OFF
     with patch("google.genai.Client"), patch("os.makedirs"):
-        b = GeminiBackend(_GEMINI_CONFIG, cfg)
+        ctx = ChannelContext.__new__(ChannelContext)
+        b = GeminiBackend(_GEMINI_CONFIG, cfg, ctx)
     if tmpdir:
-        b._log_path = lambda ch: os.path.join(tmpdir, f"{ch}.log")
-        b._ctx_path = lambda ch: os.path.join(tmpdir, f"{ch}.ctx")
-        b._cursor_path = lambda ch: os.path.join(tmpdir, f"{ch}.cursor")
+        ctx.log_path = lambda ch: os.path.join(tmpdir, f"{ch}.log")
+        ctx.ctx_path = lambda ch: os.path.join(tmpdir, f"{ch}.ctx")
+        ctx.cursor_path = lambda ch: os.path.join(tmpdir, f"{ch}.cursor")
     return b
 
 
@@ -82,7 +75,6 @@ class TestExtractOutput(unittest.TestCase):
         self.assertEqual(self.b._extract_output(""), [""])
 
     def test_think_block_inline_with_text(self):
-        # The line containing <think> is consumed entirely (including any text before it)
         content = "before <think>\nhidden\n</think>\nafter"
         result = self.b._extract_output(content)
         self.assertIn("after", result)
@@ -100,19 +92,19 @@ class TestHandleToolTag(unittest.TestCase):
         self.assertIsNone(self.b._handle_tool_tag("just a normal answer"))
 
     def test_weather_tag_detected(self):
-        with patch.object(_mod, "get_weather", return_value="15°C cloudy"):
+        with patch("app.src.llm.gemini.get_weather", return_value="15°C cloudy"):
             result = self.b._handle_tool_tag("<weather London>")
         self.assertIsNotNone(result)
         self.assertIn("15°C cloudy", result)
 
     def test_search_tag_detected(self):
-        with patch.object(_mod, "search_web", return_value="result text"):
+        with patch("app.src.llm.gemini.search_web", return_value="result text"):
             result = self.b._handle_tool_tag("<search python tips>")
         self.assertIsNotNone(result)
         self.assertIn("result text", result)
 
     def test_image_tag_detected(self):
-        with patch.object(_mod, "generate_image", return_value="http://img.example/1.png"):
+        with patch("app.src.llm.gemini.generate_image", return_value="http://img.example/1.png"):
             result = self.b._handle_tool_tag("<image a cute cat>")
         self.assertIsNotNone(result)
         self.assertIn("http://img.example/1.png", result)
@@ -126,7 +118,7 @@ class TestHandleToolTag(unittest.TestCase):
         self.assertIsNone(b._handle_tool_tag("<search query>"))
 
     def test_case_insensitive_weather(self):
-        with patch.object(_mod, "get_weather", return_value="sunny"):
+        with patch("app.src.llm.gemini.get_weather", return_value="sunny"):
             result = self.b._handle_tool_tag("<Weather Paris>")
         self.assertIsNotNone(result)
 
@@ -137,24 +129,25 @@ class TestHandleToolTag(unittest.TestCase):
 
 
 # ===========================================================================
-# GeminiBackend path helpers
+# ChannelContext path helpers
 # ===========================================================================
 class TestPathHelpers(unittest.TestCase):
     def setUp(self):
-        self.b = make_backend()
+        with patch("os.makedirs"):
+            self.ctx = ChannelContext()
 
     def test_log_path(self):
-        self.assertEqual(self.b._log_path("#chan"), "tmp/#chan.log")
+        self.assertEqual(self.ctx.log_path("#chan"), "tmp/#chan.log")
 
     def test_ctx_path(self):
-        self.assertEqual(self.b._ctx_path("#chan"), "tmp/#chan.ctx")
+        self.assertEqual(self.ctx.ctx_path("#chan"), "tmp/#chan.ctx")
 
     def test_cursor_path(self):
-        self.assertEqual(self.b._cursor_path("#chan"), "tmp/#chan.cursor")
+        self.assertEqual(self.ctx.cursor_path("#chan"), "tmp/#chan.cursor")
 
 
 # ===========================================================================
-# GeminiBackend.log_channel_message
+# ChannelContext.log_message
 # ===========================================================================
 class TestLogChannelMessage(unittest.TestCase):
     def setUp(self):
@@ -164,18 +157,18 @@ class TestLogChannelMessage(unittest.TestCase):
     def test_creates_and_appends(self):
         self.b.log_channel_message("#ch", "alice", "hello")
         self.b.log_channel_message("#ch", "bob", "world")
-        with open(self.b._log_path("#ch")) as f:
+        with open(self.b.context.log_path("#ch")) as f:
             lines = f.readlines()
         self.assertEqual(lines, ["alice: hello\n", "bob: world\n"])
 
     def test_format_is_nick_colon_message(self):
         self.b.log_channel_message("#ch", "user", "test message")
-        with open(self.b._log_path("#ch")) as f:
+        with open(self.b.context.log_path("#ch")) as f:
             content = f.read()
         self.assertEqual(content, "user: test message\n")
 
     def test_trims_to_1000_lines(self):
-        log_path = self.b._log_path("#ch")
+        log_path = self.b.context.log_path("#ch")
         with open(log_path, 'w') as f:
             for i in range(1001):
                 f.write(f"user: line {i}\n")
@@ -188,14 +181,14 @@ class TestLogChannelMessage(unittest.TestCase):
     def test_separate_channels_separate_files(self):
         self.b.log_channel_message("#a", "alice", "msg in a")
         self.b.log_channel_message("#b", "bob", "msg in b")
-        with open(self.b._log_path("#a")) as f:
+        with open(self.b.context.log_path("#a")) as f:
             self.assertIn("msg in a", f.read())
-        with open(self.b._log_path("#b")) as f:
+        with open(self.b.context.log_path("#b")) as f:
             self.assertIn("msg in b", f.read())
 
 
 # ===========================================================================
-# GeminiBackend._update_channel_context
+# ChannelContext.update
 # ===========================================================================
 class TestUpdateChannelContext(unittest.TestCase):
     def setUp(self):
@@ -206,41 +199,41 @@ class TestUpdateChannelContext(unittest.TestCase):
         self.b.client.models.generate_content.return_value = summary
 
     def _write_log(self, channel, lines):
-        with open(self.b._log_path(channel), 'w') as f:
+        with open(self.b.context.log_path(channel), 'w') as f:
             for line in lines:
                 f.write(line + "\n")
 
     def test_no_log_file_returns_empty(self):
-        result = self.b._update_channel_context("#ch", MagicMock())
+        result = self.b.context.update("#ch", MagicMock(), self.b._summarize)
         self.assertEqual(result, "")
 
     def test_empty_log_returns_existing_ctx(self):
-        open(self.b._log_path("#ch"), 'w').close()
-        with open(self.b._ctx_path("#ch"), 'w') as f:
+        open(self.b.context.log_path("#ch"), 'w').close()
+        with open(self.b.context.ctx_path("#ch"), 'w') as f:
             f.write("• old context")
-        result = self.b._update_channel_context("#ch", MagicMock())
+        result = self.b.context.update("#ch", MagicMock(), self.b._summarize)
         self.assertEqual(result, "• old context")
 
     def test_empty_log_no_ctx_returns_empty(self):
-        open(self.b._log_path("#ch"), 'w').close()
-        result = self.b._update_channel_context("#ch", MagicMock())
+        open(self.b.context.log_path("#ch"), 'w').close()
+        result = self.b.context.update("#ch", MagicMock(), self.b._summarize)
         self.assertEqual(result, "")
 
     def test_new_lines_generate_summary(self):
         self._write_log("#ch", ["alice: hello", "bob: world"])
-        result = self.b._update_channel_context("#ch", MagicMock())
+        result = self.b.context.update("#ch", MagicMock(), self.b._summarize)
         self.assertEqual(result, "• topic A\n• topic B")
 
     def test_cursor_advanced_after_update(self):
         self._write_log("#ch", ["alice: hello", "bob: world"])
-        self.b._update_channel_context("#ch", MagicMock())
-        with open(self.b._cursor_path("#ch")) as f:
+        self.b.context.update("#ch", MagicMock(), self.b._summarize)
+        with open(self.b.context.cursor_path("#ch")) as f:
             self.assertEqual(f.read(), "2")
 
     def test_ctx_file_written(self):
         self._write_log("#ch", ["alice: hello"])
-        self.b._update_channel_context("#ch", MagicMock())
-        with open(self.b._ctx_path("#ch")) as f:
+        self.b.context.update("#ch", MagicMock(), self.b._summarize)
+        with open(self.b.context.ctx_path("#ch")) as f:
             self.assertEqual(f.read(), "• topic A\n• topic B")
 
     def test_large_backlog_calls_send_fn(self):
@@ -248,13 +241,13 @@ class TestUpdateChannelContext(unittest.TestCase):
         mock_session = MagicMock()
         mock_session.send_message.return_value = MagicMock(text="catching up!")
         send_fn = MagicMock()
-        self.b._update_channel_context("#ch", mock_session, send_fn=send_fn)
+        self.b.context.update("#ch", mock_session, self.b._summarize, send_fn=send_fn)
         send_fn.assert_called_once_with("catching up!")
 
     def test_small_backlog_does_not_call_send_fn(self):
         self._write_log("#ch", [f"user: message {i}" for i in range(10)])
         send_fn = MagicMock()
-        self.b._update_channel_context("#ch", MagicMock(), send_fn=send_fn)
+        self.b.context.update("#ch", MagicMock(), self.b._summarize, send_fn=send_fn)
         send_fn.assert_not_called()
 
 
@@ -320,13 +313,13 @@ class TestMessageHandlerLogging(unittest.TestCase):
 
 
 # ===========================================================================
-# tools.py
+# tools
 # ===========================================================================
-from tools import search_web, get_weather
+from app.src.tools import search_web, get_weather
 
 
 class TestSearchWeb(unittest.TestCase):
-    @patch("tools.DDGS")
+    @patch("app.src.tools.DDGS")
     def test_returns_formatted_results(self, mock_ddgs):
         mock_ddgs.return_value.text.return_value = [
             {"title": "Python", "body": "A great language"},
@@ -337,18 +330,18 @@ class TestSearchWeb(unittest.TestCase):
         self.assertIn("A great language", result)
         self.assertIn("Docs", result)
 
-    @patch("tools.DDGS")
+    @patch("app.src.tools.DDGS")
     def test_no_results(self, mock_ddgs):
         mock_ddgs.return_value.text.return_value = []
         self.assertEqual(search_web("nothing here"), "No results found.")
 
-    @patch("tools.DDGS")
+    @patch("app.src.tools.DDGS")
     def test_exception_returns_error_string(self, mock_ddgs):
         mock_ddgs.return_value.text.side_effect = Exception("network error")
         result = search_web("query")
         self.assertIn("Search failed", result)
 
-    @patch("tools.DDGS")
+    @patch("app.src.tools.DDGS")
     def test_results_separated_by_pipe(self, mock_ddgs):
         mock_ddgs.return_value.text.return_value = [
             {"title": "A", "body": "body A"},
@@ -359,13 +352,13 @@ class TestSearchWeb(unittest.TestCase):
 
 
 class TestGetWeather(unittest.TestCase):
-    @patch("tools.requests.get")
+    @patch("app.src.tools.requests.get")
     def test_city_not_found(self, mock_get):
         mock_get.return_value.json.return_value = {"results": []}
         result = get_weather("Faketown")
         self.assertIn("not found", result)
 
-    @patch("tools.requests.get")
+    @patch("app.src.tools.requests.get")
     def test_returns_weather_string(self, mock_get):
         geo = MagicMock()
         geo.json.return_value = {
@@ -388,7 +381,7 @@ class TestGetWeather(unittest.TestCase):
         self.assertIn("Overcast", result)
         self.assertIn("70%", result)
 
-    @patch("tools.requests.get")
+    @patch("app.src.tools.requests.get")
     def test_unknown_weather_code_shows_code(self, mock_get):
         geo = MagicMock()
         geo.json.return_value = {
@@ -408,7 +401,7 @@ class TestGetWeather(unittest.TestCase):
         result = get_weather("X")
         self.assertIn("Code 999", result)
 
-    @patch("tools.requests.get")
+    @patch("app.src.tools.requests.get")
     def test_exception_returns_error_string(self, mock_get):
         mock_get.side_effect = Exception("timeout")
         result = get_weather("Anywhere")
