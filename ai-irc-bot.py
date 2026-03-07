@@ -42,7 +42,9 @@ class ConfigLoader:
             'target_ip': self.config.get('localserver', 'target_ip'),
             'local_port': self.config.get('localserver', 'local_port'),
             'mapping': self.config.get('localserver', 'mapping'),
-            'use_local_server': self.config.getboolean('localserver', 'use_local_server')
+            'use_local_server': self.config.getboolean('localserver', 'use_local_server'),
+            'url': self.config.get('localserver', 'url', fallback=None),
+            'api_key': self.config.get('localserver', 'api_key', fallback=None),
         }
 
 
@@ -110,8 +112,13 @@ class LLMClient:
         if not self.use_local:
             openai.api_key = config['api_key']
         else:
-            self.url = f"http://{local_config['target_ip']}:{local_config['local_port']}{local_config['mapping']}"
+            if local_config.get('url'):
+                self.url = local_config['url']
+            else:
+                self.url = f"http://{local_config['target_ip']}:{local_config['local_port']}{local_config['mapping']}"
             self.headers = {'Content-Type': 'application/json'}
+            if local_config.get('api_key'):
+                self.headers['Authorization'] = f"Bearer {local_config['api_key']}"
 
     def ask(self, username: str, question: str):
         if question.endswith("clear chat"):
@@ -171,7 +178,7 @@ class MessageHandler:
     def send_typing_active(self, channel: str, stop_event):
       while not stop_event.is_set():
           self.irc.send(f"@+typing=active TAGMSG {channel}")
-          stop_event.wait(5)
+          stop_event.wait(1)
 
     def handle(self, line: str):
         if line.startswith("PING"):
