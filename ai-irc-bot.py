@@ -3,8 +3,17 @@ import ssl
 import time
 import configparser
 import requests
-import openai
+from google import genai
+from google.genai import types
+from openai import OpenAI
 import threading
+import logging
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 class ConfigLoader:
     def __init__(self, path='chat.conf'):
@@ -24,25 +33,43 @@ class ConfigLoader:
             'password': self.config.get('irc', 'password')
         }
 
-    def get_openai_config(self):
+    def get_provider(self) -> str:
+        return self.config.get('provider', 'backend')
+
+    def get_gemini_config(self) -> dict:
         return {
-            'api_key': self.config.get('openai', 'api_key'),
-            'model': self.config.get('chatcompletion', 'model'),
-            'context': self.config.get('chatcompletion', 'context'),
-            'temperature': self.config.getfloat('chatcompletion', 'temperature'),
-            'max_tokens': self.config.getint('chatcompletion', 'max_tokens'),
-            'top_p': self.config.getint('chatcompletion', 'top_p'),
-            'frequency_penalty': self.config.getint('chatcompletion', 'frequency_penalty'),
-            'presence_penalty': self.config.getint('chatcompletion', 'presence_penalty'),
-            'request_timeout': self.config.getint('chatcompletion', 'request_timeout')
+            'api_key': self.config.get('gemini', 'api_key'),
+            'model': self.config.get('gemini', 'model'),
+            'context': self.config.get('gemini', 'context'),
+            'max_output_tokens': self.config.getint('gemini', 'max_output_tokens'),
+            'temperature': self.config.getfloat('gemini', 'temperature'),
         }
 
-    def get_local_server_config(self):
+    def get_openai_config(self) -> dict:
+        return {
+            'api_key': self.config.get('openai', 'api_key'),
+            'model': self.config.get('openai', 'model'),
+            'context': self.config.get('openai', 'context'),
+            'max_tokens': self.config.getint('openai', 'max_tokens'),
+            'temperature': self.config.getfloat('openai', 'temperature'),
+        }
+
+    def get_local_config(self) -> dict:
         return {
             'target_ip': self.config.get('localserver', 'target_ip'),
             'local_port': self.config.get('localserver', 'local_port'),
             'mapping': self.config.get('localserver', 'mapping'),
-            'use_local_server': self.config.getboolean('localserver', 'use_local_server')
+            'context': self.config.get('localserver', 'context'),
+            'max_tokens': self.config.getint('localserver', 'max_tokens'),
+            'temperature': self.config.getfloat('localserver', 'temperature'),
+        }
+
+    def get_tools_config(self) -> dict:
+        return {
+            'enable_web_search': self.config.getboolean('tools', 'enable_web_search'),
+            'enable_weather': self.config.getboolean('tools', 'enable_weather'),
+            'enable_image_generation': self.config.getboolean('tools', 'enable_image_generation'),
+            'imgbb_api_key': self.config.get('tools', 'imgbb_api_key'),
         }
 
 
@@ -57,11 +84,14 @@ class IRCClient:
         self.realname: str = config['realname']
         self.password: str = config['password']
         self.socket: socket = None
+        self._buffer: str = ""
+        self.joined: bool = False
 
     def connect(self):
+        self.joined = False
         while True:
             try:
-                print(f"Connecting to: {self.server}:{self.port}")
+                logger.info(f"Connecting to: {self.server}:{self.port}")
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.connect((self.server, self.port))
                 if self.usessl:
@@ -76,78 +106,37 @@ class IRCClient:
                 self.send(f"USER {self.ident} 0 * :{self.realname}")
                 self.send(f"NICK {self.nickname}")
                 self.send("CAP REQ :message-tags")
+                self.send("CAP REQ :echo-message")
                 self.send("CAP END")
-                print("Connected successfully.")
+                logger.info("Connected successfully.")
                 return
             except Exception as e:
-                print(f"Connection failed: {e}. Retrying in 5 seconds...")
+                logger.error(f"Connection failed: {e}. Retrying in 5 seconds...")
                 time.sleep(5)
 
     def send(self, msg):
-        print(">", msg)
+        logger.debug("> %s", msg)
         self.socket.send(bytes(msg + "\n", "UTF-8"))
 
-    def receive(self):
+    def receive(self) -> list[str]:
         try:
-            return self.socket.recv(8192).decode("UTF-8")
+            raw = self.socket.recv(8192).decode("UTF-8")
         except UnicodeDecodeError:
-            return None
+            return []
+        self._buffer += raw
+        lines = self._buffer.split("\n")
+        self._buffer = lines[-1]
+        return [line.strip() for line in lines[:-1] if line.strip()]
 
 
-class LLMClient:
-    def __init__(self, config: dict, local_config: dict):
-        self.use_local: bool = local_config['use_local_server']
-        self.context: str = config['context']
-        self.model: str = config['model']
-        self.messages: list[dict[str:str]] = [{'role': 'system', 'content': self.context}]
-        self.temperature: float = config['temperature']
-        self.max_tokens: int = config['max_tokens']
-        self.top_p: int = config['top_p']
-        self.freq_penalty: int = config['frequency_penalty']
-        self.pres_penalty: int = config['presence_penalty']
-        self.timeout: int = config['request_timeout']
+class BaseLLMBackend:
+    def ask(self, channel: str, username: str, question: str) -> list[str]:
+        raise NotImplementedError
 
-        if not self.use_local:
-            openai.api_key = config['api_key']
-        else:
-            self.url = f"http://{local_config['target_ip']}:{local_config['local_port']}{local_config['mapping']}"
-            self.headers = {'Content-Type': 'application/json'}
+    def clear(self, channel: str) -> None:
+        raise NotImplementedError
 
-    def ask(self, username: str, question: str):
-        if question.endswith("clear chat"):
-            self.messages = [{'role': 'system', 'content': self.context}]
-            return ["cleared log"]
-
-        user_message = {'role': 'user', 'content': f'<{username}> {question}'}
-        self.messages.append(user_message)
-
-        if self.use_local:
-            payload = {
-                'messages': self.messages,
-                'temperature': self.temperature,
-                'max_tokens': self.max_tokens,
-                'stream': False
-            }
-            response = requests.post(self.url, headers=self.headers, json=payload)
-            response.raise_for_status()
-            content = response.json()['choices'][0]['message']['content']
-        else:
-            response = openai.ChatCompletion.create(
-                model=self.model,
-                messages=self.messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                top_p=self.top_p,
-                frequency_penalty=self.freq_penalty,
-                presence_penalty=self.pres_penalty,
-                request_timeout=self.timeout
-            )
-            content = response.choices[0].message.content
-
-        self.messages.append({'role': 'assistant', 'content': content})
-        return self._extract_output(content)
-
-    def _extract_output(self, content: str):
+    def _extract_output(self, content: str) -> list[str]:
         output, thought, inside_think = [], [], False
         for line in content.split('\n'):
             if '<think>' in line:
@@ -159,15 +148,136 @@ class LLMClient:
                 continue
             output.append(line)
         if thought:
-            print("Thought:", '\n'.join(thought))
+            logger.debug("Thought: %s", '\n'.join(thought))
         return output
 
 
+class GeminiBackend(BaseLLMBackend):
+    def __init__(self, config: dict, tools_config: dict):
+        self.client = genai.Client(api_key=config['api_key'])
+        self.model_name = config['model']
+        self.context = config['context']
+        self.generation_config = types.GenerateContentConfig(
+            temperature=config['temperature'],
+            max_output_tokens=config['max_output_tokens'],
+        )
+        self.sessions: dict = {}  # channel -> Chat
+
+    def _get_session(self, channel: str):
+        if channel not in self.sessions:
+            # Inject context as a user/model history pair — works for all models
+            # including gemma which doesn't support system_instruction
+            history = [
+                types.Content(role='user', parts=[types.Part(text=f"[System context: {self.context}]")]),
+                types.Content(role='model', parts=[types.Part(text="Understood.")]),
+            ]
+            self.sessions[channel] = self.client.chats.create(
+                model=self.model_name,
+                config=self.generation_config,
+                history=history,
+            )
+        return self.sessions[channel]
+
+    def ask(self, channel: str, username: str, question: str) -> list[str]:
+        if question.strip().endswith("clear chat"):
+            self.clear(channel)
+            return ["cleared log"]
+        session = self._get_session(channel)
+        response = session.send_message(f"<{username}> {question}")
+        return self._extract_output(response.text)
+
+    def clear(self, channel: str) -> None:
+        self.sessions.pop(channel, None)
+
+
+class OpenAIBackend(BaseLLMBackend):
+    def __init__(self, config: dict, tools_config: dict):
+        self.client = OpenAI(api_key=config['api_key'])
+        self.model = config['model']
+        self.context = config['context']
+        self.temperature = config['temperature']
+        self.max_tokens = config['max_tokens']
+        self.messages: dict[str, list] = {}
+
+    def _get_messages(self, channel: str) -> list:
+        if channel not in self.messages:
+            self.messages[channel] = [{'role': 'system', 'content': self.context}]
+        return self.messages[channel]
+
+    def ask(self, channel: str, username: str, question: str) -> list[str]:
+        if question.strip().endswith("clear chat"):
+            self.clear(channel)
+            return ["cleared log"]
+        msgs = self._get_messages(channel)
+        msgs.append({'role': 'user', 'content': f'<{username}> {question}'})
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=msgs,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+        content = response.choices[0].message.content
+        msgs.append({'role': 'assistant', 'content': content})
+        return self._extract_output(content)
+
+    def clear(self, channel: str) -> None:
+        self.messages.pop(channel, None)
+
+
+class LocalBackend(BaseLLMBackend):
+    def __init__(self, config: dict):
+        self.url = f"http://{config['target_ip']}:{config['local_port']}{config['mapping']}"
+        self.headers = {'Content-Type': 'application/json'}
+        self.context = config['context']
+        self.temperature = config['temperature']
+        self.max_tokens = config['max_tokens']
+        self.messages: dict[str, list] = {}
+
+    def _get_messages(self, channel: str) -> list:
+        if channel not in self.messages:
+            self.messages[channel] = [{'role': 'system', 'content': self.context}]
+        return self.messages[channel]
+
+    def ask(self, channel: str, username: str, question: str) -> list[str]:
+        if question.strip().endswith("clear chat"):
+            self.clear(channel)
+            return ["cleared log"]
+        msgs = self._get_messages(channel)
+        msgs.append({'role': 'user', 'content': f'<{username}> {question}'})
+        payload = {
+            'messages': msgs,
+            'temperature': self.temperature,
+            'max_tokens': self.max_tokens,
+            'stream': False,
+        }
+        response = requests.post(self.url, headers=self.headers, json=payload)
+        response.raise_for_status()
+        content = response.json()['choices'][0]['message']['content']
+        msgs.append({'role': 'assistant', 'content': content})
+        return self._extract_output(content)
+
+    def clear(self, channel: str) -> None:
+        self.messages.pop(channel, None)
+
+
+class LLMClient:
+    """Factory — reads provider and returns the appropriate backend instance."""
+    def __new__(cls, provider: str, config: dict, tools_config: dict):
+        if provider == 'gemini':
+            return GeminiBackend(config, tools_config)
+        elif provider == 'openai':
+            return OpenAIBackend(config, tools_config)
+        elif provider == 'local':
+            return LocalBackend(config)
+        raise ValueError(f"Unknown provider: {provider}")
+
+
 class MessageHandler:
-    def __init__(self, irc_client: IRCClient, llm_client: LLMClient):
+    def __init__(self, irc_client: IRCClient, llm_client):
         self.irc = irc_client
         self.llm = llm_client
-    
+        self.active_threads: set[str] = set()
+
     def send_typing_active(self, channel: str, stop_event):
       while not stop_event.is_set():
           self.irc.send(f"@+typing=active TAGMSG {channel}")
@@ -176,63 +286,101 @@ class MessageHandler:
     def handle(self, line: str):
         if line.startswith("PING"):
             self.irc.send("PONG " + line.split()[1])
-            self.irc.send("JOIN " + ",".join(self.irc.channels))
+            if not self.irc.joined:
+                self.irc.send("JOIN " + ",".join(self.irc.channels))
+                self.irc.joined = True
             return
 
-        if "PRIVMSG" in line and f":{self.irc.nickname}:" in line:
-            parts = line.split()
-            channel = parts[3]
-            username = line.split('!')[0].split()[1][1:]
+        if "KICK" in line and self.irc.nickname in line:
+            channel = line.split()[2]
+            self.irc.send(f"JOIN {channel}")
+            return
+
+        if "PRIVMSG" not in line:
+            return
+
+        parts = line.split()
+        if line.startswith("@"):
+            raw_tags = parts[0][1:]
+            tag_dict = {k.lstrip("+"): v for tag in raw_tags.split(";") if "=" in tag for k, v in [tag.split("=", 1)]}
+        else:
+            tag_dict = {}
+
+        reply_to = tag_dict.get("draft/reply")
+        incoming_msgid = tag_dict.get("msgid")
+
+        # Echo-message: server sends back our own messages with their server-assigned msgid.
+        # Track those so replies to the bot's messages are also detected as in_bot_thread.
+        if f":{self.irc.nickname}!" in line:
+            if incoming_msgid:
+                self.active_threads.add(incoming_msgid)
+            return
+
+        directly_addressed = f":{self.irc.nickname}:" in line
+        in_bot_thread = reply_to is not None and reply_to in self.active_threads
+
+        if not (directly_addressed or in_bot_thread):
+            return
+
+        channel = parts[3]
+        username = line.split('!')[0].split()[1][1:]
+
+        if directly_addressed:
             question = line.split(f":{self.irc.nickname}:", 1)[1].strip()
-            tag_dict = dict(tag.split("=", 1) for tag in parts[0][2:].split(" ", 1)[0].split(";") if "=" in tag)
-            msgid = tag_dict.get("draft/reply") or tag_dict.get("msgid")
+        else:
+            question = line.split(f"PRIVMSG {channel} :", 1)[1].strip()
 
-            # send "typing" event every 5 seconds
-            stop_typing = threading.Event()
-            typing_thread = threading.Thread(target=self.send_typing_active, args=(channel, stop_typing))
-            typing_thread.start()
+        thread_id = reply_to or incoming_msgid
 
-            responses = self.llm.ask(username, question)
+        # send "typing" event every 5 seconds
+        stop_typing = threading.Event()
+        typing_thread = threading.Thread(target=self.send_typing_active, args=(channel, stop_typing))
+        typing_thread.start()
 
-            # halt typing event and send typing=done
-            stop_typing.set()
-            typing_thread.join()
-            self.irc.send(f"@+typing=done TAGMSG {channel}")
+        responses = self.llm.ask(channel, username, question)
 
-            for response in responses:
-                while response:
-                    if len(response) <= 392:
-                        self.irc.send(f"@+draft/reply={msgid} PRIVMSG {channel} :{response}")
-                        break
-                    split_idx = response[:392].rfind(" ")
-                    if split_idx == -1:
-                        split_idx = 392
-                    self.irc.send(f"@+draft/reply={msgid} PRIVMSG {channel} :{response[:split_idx]}")
-                    response = response[split_idx:].lstrip()
+        # halt typing event and send typing=done
+        stop_typing.set()
+        typing_thread.join()
+        self.irc.send(f"@+typing=done TAGMSG {channel}")
+
+        prefix = f"@+draft/reply={thread_id} " if thread_id else ""
+        for response in responses:
+            while response:
+                if len(response) <= 392:
+                    self.irc.send(f"{prefix}PRIVMSG {channel} :{response}")
+                    break
+                split_idx = response[:392].rfind(" ")
+                if split_idx == -1:
+                    split_idx = 392
+                self.irc.send(f"{prefix}PRIVMSG {channel} :{response[:split_idx]}")
+                response = response[split_idx:].lstrip()
+
+        # Track this thread so future replies to it also trigger the bot
+        if incoming_msgid:
+            self.active_threads.add(incoming_msgid)
+        if thread_id:
+            self.active_threads.add(thread_id)
 
 
 class Bot:
     def __init__(self):
         self.config_loader = ConfigLoader()
         irc_config: dict = self.config_loader.get_irc_config()
-        openai_config: dict = self.config_loader.get_openai_config()
-        local_config: dict = self.config_loader.get_local_server_config()
+        provider: str = self.config_loader.get_provider()
+        provider_config: dict = getattr(self.config_loader, f'get_{provider}_config')()
+        tools_config: dict = self.config_loader.get_tools_config()
 
         self.irc = IRCClient(irc_config)
-        self.llm = LLMClient(openai_config, local_config)
+        self.llm = LLMClient(provider, provider_config, tools_config)
         self.handler = MessageHandler(self.irc, self.llm)
 
     def run(self):
         self.irc.connect()
         while True:
-            data = self.irc.receive()
-            if not data:
-                continue
-            for line in data.split("\n"):
-                line = line.strip()
-                if line:
-                    print(line)
-                    self.handler.handle(line)
+            for line in self.irc.receive():
+                logger.debug(line)
+                self.handler.handle(line)
             time.sleep(1)
 
 
