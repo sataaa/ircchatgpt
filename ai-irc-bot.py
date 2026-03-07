@@ -1,3 +1,4 @@
+import re
 import socket
 import ssl
 import time
@@ -8,9 +9,10 @@ from google.genai import types
 from openai import OpenAI
 import threading
 import logging
+from tools import search_web, get_weather, generate_image
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s %(levelname)s %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -154,9 +156,23 @@ class BaseLLMBackend:
 
 class GeminiBackend(BaseLLMBackend):
     def __init__(self, config: dict, tools_config: dict):
-        self.client = genai.Client(api_key=config['api_key'])
+        self.api_key = config['api_key']
+        self.client = genai.Client(api_key=self.api_key)
         self.model_name = config['model']
-        self.context = config['context']
+        self.tools_config = tools_config
+
+        context = config['context']
+        tool_instructions = []
+        if tools_config.get('enable_weather'):
+            tool_instructions.append("to get weather, output exactly: <weather CityName>")
+        if tools_config.get('enable_web_search'):
+            tool_instructions.append("to search the web, output exactly: <search your query>")
+        if tools_config.get('enable_image_generation') and tools_config.get('imgbb_api_key'):
+            tool_instructions.append("to generate an image, output exactly: <image your prompt>")
+        if tool_instructions:
+            context += ". " + "; ".join(tool_instructions) + ". output only the tag, nothing else, when calling a tool"
+
+        self.context = context
         self.generation_config = types.GenerateContentConfig(
             temperature=config['temperature'],
             max_output_tokens=config['max_output_tokens'],
@@ -178,12 +194,36 @@ class GeminiBackend(BaseLLMBackend):
             )
         return self.sessions[channel]
 
+    def _handle_tool_tag(self, text: str) -> str | None:
+        """If text contains a tool tag, call the tool and return the result. Else None."""
+        m = re.search(r'<weather\s+(.+?)>', text, re.IGNORECASE)
+        if m and self.tools_config.get('enable_weather'):
+            return f"[Weather] {get_weather(m.group(1).strip())}"
+
+        m = re.search(r'<search\s+(.+?)>', text, re.IGNORECASE)
+        if m and self.tools_config.get('enable_web_search'):
+            return f"[Search] {search_web(m.group(1).strip())}"
+
+        m = re.search(r'<image\s+(.+?)>', text, re.IGNORECASE)
+        if m and self.tools_config.get('enable_image_generation') and self.tools_config.get('imgbb_api_key'):
+            return f"[Image] {generate_image(self.api_key, self.tools_config['imgbb_api_key'], m.group(1).strip())}"
+
+        return None
+
     def ask(self, channel: str, username: str, question: str) -> list[str]:
         if question.strip().endswith("clear chat"):
             self.clear(channel)
             return ["cleared log"]
         session = self._get_session(channel)
         response = session.send_message(f"<{username}> {question}")
+
+        for _ in range(3):  # max 3 tool calls
+            tool_result = self._handle_tool_tag(response.text)
+            if tool_result is None:
+                break
+            logger.info("Tool call: %s → %s", response.text.strip(), tool_result)
+            response = session.send_message(f"[Tool result: {tool_result}]")
+
         return self._extract_output(response.text)
 
     def clear(self, channel: str) -> None:
