@@ -27,31 +27,37 @@ Edit `chat.conf` — minimum required fields:
 
 See `example-chat.conf` for all available options.
 
-## Running with Podman (recommended)
+## Running
 
-Podman runs rootless with no background daemon — ideal for Linux and WSL2.
+The recommended way is `run.sh`, which stops any existing container, rebuilds
+the image, and starts it in the background:
 
-    # Install on Ubuntu/Debian (including WSL)
-    sudo apt install podman
+    ./run.sh
 
-    # Build
+Channel logs and context files are written to `tmp/` in the working directory
+and can be read while the bot is running:
+
+    tail -f tmp/'#yourchannel.log'   # raw message log
+    cat  tmp/'#yourchannel.ctx'      # current context summary
+    cat  tmp/'#yourchannel.cursor'   # line count at last context update
+
+### Manual Podman
+
     podman build -t ircchatgpt .
-
-    # Run (foreground)
-    podman run -it --rm -v $(pwd)/chat.conf:/app/chat.conf ircchatgpt
-
-    # Run in background
     podman run -d --name ircchatgpt --restart unless-stopped \
-      -v $(pwd)/chat.conf:/app/chat.conf ircchatgpt
+      -v $(pwd)/chat.conf:/app/chat.conf \
+      -v $(pwd)/tmp:/app/tmp \
+      ircchatgpt
 
-## Running with Docker
+    podman logs -f ircchatgpt
+
+### Docker
 
     docker build -t ircchatgpt .
-    docker run -it --rm -v $(pwd)/chat.conf:/app/chat.conf ircchatgpt
-
-    # Background
     docker run -d --name ircchatgpt --restart unless-stopped \
-      -v $(pwd)/chat.conf:/app/chat.conf ircchatgpt
+      -v $(pwd)/chat.conf:/app/chat.conf \
+      -v $(pwd)/tmp:/app/tmp \
+      ircchatgpt
 
 ## Interaction
 
@@ -63,23 +69,48 @@ The bot responds when you mention its nickname in a channel:
     10:35:56 <knrd1> MyBot: what is the capital of Brazil?
     10:35:59 <MyBot> The capital of Brazil is Brasília.
 
+The bot also passively reads all channel messages and maintains a rolling
+context summary, so it understands ongoing conversations even when not addressed.
+
 To reset the conversation history for the current channel:
 
     <knrd1> MyBot: clear chat
 
+## Tools
+
+Optional tools can be enabled in `[tools]`. When active, the bot can look up
+weather, search the web, and generate images on request.
+
+| Tool | Config key | Requires |
+|------|-----------|---------|
+| Weather | `enable_weather = true` | nothing (open-meteo) |
+| Web search | `enable_web_search = true` | nothing (DuckDuckGo) |
+| Image generation | `enable_image_generation = true` | `imgbb_api_key` + Gemini |
+
+When a tool is used, the bot briefly mentions it looked something up.
+
+## Tests
+
+    # Inside the container
+    podman exec ircchatgpt /app/venv/bin/python -m pytest test_bot.py -v
+
+    # Or locally with requirements installed
+    pip install -r requirements.txt
+    python -m pytest test_bot.py -v
+
 ## Configuration Reference
 
 ### [provider]
-| Key | Values | Default |
-|-----|--------|---------|
-| `backend` | `gemini` \| `openai` \| `local` | `gemini` |
+| Key | Values |
+|-----|--------|
+| `backend` | `gemini` \| `openai` \| `local` |
 
 ### [gemini]
 | Key | Description |
 |-----|-------------|
 | `api_key` | Gemini API key from Google AI Studio |
 | `model` | Model name (e.g. `gemma-3-27b-it`) |
-| `context` | System prompt for the bot's personality |
+| `context` | System prompt / bot personality |
 | `max_output_tokens` | Max tokens in response (default: `1000`) |
 | `temperature` | Randomness 0.0–1.0 (default: `0.8`) |
 
@@ -99,6 +130,8 @@ To reset the conversation history for the current channel:
 | `local_port` | Port (e.g. `55511`) |
 | `mapping` | API path (e.g. `/v1/chat/completions`) |
 | `context` | System prompt |
+| `max_tokens` | Max tokens in response |
+| `temperature` | Randomness 0.0–1.0 |
 
 ### [irc]
 | Key | Description |
@@ -111,3 +144,11 @@ To reset the conversation history for the current channel:
 | `ident` | Ident string |
 | `realname` | Real name string |
 | `password` | Server password (leave blank if none) |
+
+### [tools]
+| Key | Description |
+|-----|-------------|
+| `enable_web_search` | `true` / `false` — DuckDuckGo search |
+| `enable_weather` | `true` / `false` — current weather via open-meteo |
+| `enable_image_generation` | `true` / `false` — image gen via Gemini + imgbb |
+| `imgbb_api_key` | [imgbb](https://api.imgbb.com/) API key (required for image gen) |
