@@ -76,6 +76,19 @@ To reset the conversation history for the current channel:
 
     <knrd1> MyBot: clear chat
 
+## Custom Orders
+
+You can send the bot a custom instruction from the host machine without going through IRC using `custom-order.sh`:
+
+    ./custom-order.sh notes say something about the weather today
+    ./custom-order.sh '#linux' greet the channel
+
+The first argument is the channel name (`#` prefix is optional). Everything after it is the instruction passed to the LLM, which will then post a message to that channel as if it came up naturally.
+
+This works by writing an order file to `tmp/<channel>.order`, which the bot picks up on its next loop iteration.
+
+> **Planned:** custom orders will also be accepted via IRC private message from a configurable trusted nickname, so you can issue orders directly from any IRC client without shell access to the host.
+
 ## Tools
 
 Optional tools can be enabled in `[tools]`. When active, the bot can look up
