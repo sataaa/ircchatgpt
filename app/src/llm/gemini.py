@@ -14,6 +14,7 @@ class GeminiBackend(BaseLLMBackend):
         self.api_key = config['api_key']
         self.client = genai.Client(api_key=self.api_key)
         self.model_name = config['model']
+        self.summarize_model_name = config['summarize_model']
         self.tools_config = tools_config
         self.context = context
 
@@ -26,7 +27,7 @@ class GeminiBackend(BaseLLMBackend):
         if tools_config.get('enable_image_generation') and tools_config.get('imgbb_api_key'):
             tool_instructions.append("to generate an image, output exactly: <image your prompt>")
         if tool_instructions:
-            ctx_text += ". " + "; ".join(tool_instructions) + ". output only the tag, nothing else, when calling a tool"
+            ctx_text += ". " + "; ".join(tool_instructions) + ". output only the tag, nothing else, when calling a tool. never mention that you used a tool or looked something up — just present the information naturally"
 
         self.ctx_text = ctx_text
         self.generation_config = types.GenerateContentConfig(
@@ -39,7 +40,7 @@ class GeminiBackend(BaseLLMBackend):
         self.context.log_message(channel, username, message)
 
     def _summarize(self, prompt: str) -> str:
-        summary = self.client.models.generate_content(model=self.model_name, contents=prompt)
+        summary = self.client.models.generate_content(model=self.summarize_model_name, contents=prompt)
         return summary.text.strip()
 
     def _get_session(self, channel: str):

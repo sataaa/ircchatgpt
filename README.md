@@ -87,7 +87,7 @@ weather, search the web, and generate images on request.
 | Web search | `enable_web_search = true` | nothing (DuckDuckGo) |
 | Image generation | `enable_image_generation = true` | `imgbb_api_key` + Gemini |
 
-When a tool is used, the bot briefly mentions it looked something up.
+When a tool is used, the bot presents the result naturally without announcing it.
 
 ## Tests
 
@@ -109,7 +109,8 @@ When a tool is used, the bot briefly mentions it looked something up.
 | Key | Description |
 |-----|-------------|
 | `api_key` | Gemini API key from Google AI Studio |
-| `model` | Model name (e.g. `gemma-3-27b-it`) |
+| `model` | Model for chat responses (e.g. `gemini-2.0-flash`) |
+| `summarize_model` | Model for background context summarization (e.g. `gemma-3-27b-it`) |
 | `context` | System prompt / bot personality |
 | `max_output_tokens` | Max tokens in response (default: `1000`) |
 | `temperature` | Randomness 0.0–1.0 (default: `0.8`) |
@@ -144,6 +145,7 @@ When a tool is used, the bot briefly mentions it looked something up.
 | `ident` | Ident string |
 | `realname` | Real name string |
 | `password` | Server password (leave blank if none) |
+| `private_channels` | Comma-separated channels to exclude from passive logging |
 
 ### [tools]
 | Key | Description |

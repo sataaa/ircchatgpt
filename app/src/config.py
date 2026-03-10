@@ -27,6 +27,7 @@ class ConfigLoader:
         return {
             'api_key': self.config.get('gemini', 'api_key'),
             'model': self.config.get('gemini', 'model'),
+            'summarize_model': self.config.get('gemini', 'summarize_model'),
             'context': self.config.get('gemini', 'context'),
             'max_output_tokens': self.config.getint('gemini', 'max_output_tokens'),
             'temperature': self.config.getfloat('gemini', 'temperature'),
