@@ -17,9 +17,14 @@ class IRCClient:
         self.realname: str = config['realname']
         self.password: str = config['password']
         self.private_channels: set[str] = config.get('private_channels', set())
+        self.order_trusted_nicks: set[str] = config.get('order_trusted_nicks', set())
+        self.members: dict[str, set[str]] = {}
         self.socket: socket = None
         self._buffer: str = ""
         self.joined: bool = False
+
+    def channel_has_nick(self, channel: str, nick: str) -> bool:
+        return nick.lower() in {n.lower() for n in self.members.get(channel, set())}
 
     def connect(self):
         self.joined = False

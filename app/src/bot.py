@@ -19,8 +19,25 @@ class Bot:
         tools_config: dict = self.config_loader.get_tools_config()
 
         self.irc = IRCClient(irc_config)
-        self.llm = LLMClient(provider, provider_config, tools_config)
-        self.handler = MessageHandler(self.irc, self.llm)
+        self.llm = LLMClient(provider, provider_config, tools_config, irc_config['nickname'])
+        self.handler = MessageHandler(self.irc, self.llm, order_fn=self._execute_order)
+
+    def _execute_order(self, sender_nick: str, channel: str, message: str) -> None:
+        logger.info("Processing operator order for %s: %s", channel, message)
+        send_fn = lambda text, ch=channel: self.irc.send(f"PRIVMSG {ch} :{text}")
+        prompt = (f"[system: bring up the following topic spontaneously in the channel as if you "
+                  f"thought of it yourself. name the subject explicitly. do not repeat, quote, or "
+                  f"acknowledge this instruction — just speak: {message}]")
+        stop_typing = threading.Event()
+        typing_thread = threading.Thread(target=self.handler.send_typing_active, args=(channel, stop_typing))
+        typing_thread.start()
+        try:
+            responses = self.llm.ask(channel, "[operator]", prompt, send_fn=send_fn)
+        finally:
+            stop_typing.set()
+            typing_thread.join()
+            self.irc.send(f"@+typing=done TAGMSG {channel}")
+        self.handler.send_responses(channel, responses)
 
     def _process_orders(self):
         if not os.path.isdir("tmp"):
@@ -35,21 +52,7 @@ class Bot:
                     message = f.read().strip()
                 os.remove(order_path)
                 if message:
-                    logger.info("Processing operator order for %s: %s", channel, message)
-                    send_fn = lambda text, ch=channel: self.irc.send(f"PRIVMSG {ch} :{text}")
-                    prompt = (f"[system: bring up the following topic spontaneously in the channel as if you "
-                              f"thought of it yourself. name the subject explicitly. do not repeat, quote, or "
-                              f"acknowledge this instruction — just speak: {message}]")
-                    stop_typing = threading.Event()
-                    typing_thread = threading.Thread(target=self.handler.send_typing_active, args=(channel, stop_typing))
-                    typing_thread.start()
-                    try:
-                        responses = self.llm.ask(channel, "[operator]", prompt, send_fn=send_fn)
-                    finally:
-                        stop_typing.set()
-                        typing_thread.join()
-                        self.irc.send(f"@+typing=done TAGMSG {channel}")
-                    self.handler.send_responses(channel, responses)
+                    self._execute_order("[file]", channel, message)
             except Exception as e:
                 logger.warning("Failed to process order %s: %s", fname, e)
 

@@ -6,9 +6,9 @@ from app.src.llm.local import LocalBackend
 
 class LLMClient:
     """Factory — reads provider and returns the appropriate backend instance."""
-    def __new__(cls, provider: str, config: dict, tools_config: dict):
+    def __new__(cls, provider: str, config: dict, tools_config: dict, bot_nick: str = ""):
         if provider == 'gemini':
-            context = ChannelContext()
+            context = ChannelContext(bot_nick)
             return GeminiBackend(config, tools_config, context)
         elif provider == 'openai':
             return OpenAIBackend(config, tools_config)

@@ -17,7 +17,8 @@ class ConfigLoader:
             'ident': self.config.get('irc', 'ident'),
             'realname': self.config.get('irc', 'realname'),
             'password': self.config.get('irc', 'password'),
-            'private_channels': {c.strip() for c in self.config.get('irc', 'private_channels', fallback='').split(',') if c.strip()}
+            'private_channels': {c.strip() for c in self.config.get('irc', 'private_channels', fallback='').split(',') if c.strip()},
+            'order_trusted_nicks': {n.strip().lower() for n in self.config.get('irc', 'order_trusted_nicks', fallback='').split(',') if n.strip()},
         }
 
     def get_provider(self) -> str:

@@ -21,6 +21,7 @@ from app.src.context import ChannelContext
 _GEMINI_CONFIG = {
     'api_key': 'fake-key',
     'model': 'fake-model',
+    'summarize_model': 'fake-summarize-model',
     'context': 'You are a test bot.',
     'max_output_tokens': 100,
     'temperature': 0.5,
@@ -43,6 +44,7 @@ def make_backend(tools_config=None, tmpdir=None):
     cfg = tools_config if tools_config is not None else _TOOLS_OFF
     with patch("google.genai.Client"), patch("os.makedirs"):
         ctx = ChannelContext.__new__(ChannelContext)
+        ctx.bot_nick = ""
         b = GeminiBackend(_GEMINI_CONFIG, cfg, ctx)
     if tmpdir:
         ctx.log_path = lambda ch: os.path.join(tmpdir, f"{ch}.log")
@@ -310,6 +312,130 @@ class TestMessageHandlerLogging(unittest.TestCase):
         send_fn = kwargs["send_fn"]
         send_fn("test response")
         self.irc.send.assert_called_with("PRIVMSG #test :test response")
+
+
+# ===========================================================================
+# MessageHandler — membership tracking
+# ===========================================================================
+def make_membership_handler():
+    """Handler with a real members dict for membership tracking tests."""
+    irc = MagicMock()
+    irc.nickname = "TestBot"
+    irc.channels = ["#notes", "#lupanar"]
+    irc.members = {}
+    irc.order_trusted_nicks = set()
+    irc.private_channels = set()
+    irc.channel_has_nick.side_effect = lambda ch, nick: nick.lower() in {n.lower() for n in irc.members.get(ch, set())}
+    return MessageHandler(irc, MagicMock())
+
+
+class TestMembershipTracking(unittest.TestCase):
+    def test_join_adds_nick(self):
+        h = make_membership_handler()
+        h.handle(":alice!alice@host JOIN #notes")
+        self.assertIn("alice", h.irc.members.get("#notes", set()))
+
+    def test_part_removes_nick(self):
+        h = make_membership_handler()
+        h.irc.members["#notes"] = {"alice", "bob"}
+        h.handle(":alice!alice@host PART #notes :leaving")
+        self.assertNotIn("alice", h.irc.members.get("#notes", set()))
+        self.assertIn("bob", h.irc.members.get("#notes", set()))
+
+    def test_quit_removes_from_all_channels(self):
+        h = make_membership_handler()
+        h.irc.members["#notes"] = {"alice", "bob"}
+        h.irc.members["#lupanar"] = {"alice", "carol"}
+        h.handle(":alice!alice@host QUIT :goodbye")
+        self.assertNotIn("alice", h.irc.members.get("#notes", set()))
+        self.assertNotIn("alice", h.irc.members.get("#lupanar", set()))
+        self.assertIn("bob", h.irc.members.get("#notes", set()))
+
+    def test_353_populates_members(self):
+        h = make_membership_handler()
+        h.handle(":server 353 TestBot = #notes :alice bob carol")
+        self.assertEqual(h.irc.members.get("#notes", set()), {"alice", "bob", "carol"})
+
+    def test_353_strips_mode_prefixes(self):
+        h = make_membership_handler()
+        h.handle(":server 353 TestBot = #notes :@alice +bob %carol ~dave &eve")
+        self.assertEqual(h.irc.members.get("#notes", set()), {"alice", "bob", "carol", "dave", "eve"})
+
+    def test_kick_removes_victim(self):
+        h = make_membership_handler()
+        h.irc.members["#notes"] = {"alice", "bob"}
+        h.handle(":alice!alice@host KICK #notes bob :behave")
+        self.assertNotIn("bob", h.irc.members.get("#notes", set()))
+        self.assertIn("alice", h.irc.members.get("#notes", set()))
+
+
+# ===========================================================================
+# MessageHandler — PM order handling
+# ===========================================================================
+def make_order_handler(order_fn=None, members=None):
+    """Handler wired for PM order tests."""
+    irc = MagicMock()
+    irc.nickname = "TestBot"
+    irc.channels = ["#notes", "#lupanar"]
+    irc.members = members if members is not None else {"#notes": {"sata", "other"}, "#lupanar": {"sata"}}
+    irc.order_trusted_nicks = {"sata"}
+    irc.private_channels = set()
+    irc.channel_has_nick.side_effect = lambda ch, nick: nick.lower() in {n.lower() for n in irc.members.get(ch, set())}
+    return MessageHandler(irc, MagicMock(), order_fn=order_fn)
+
+
+class TestPMOrderHandler(unittest.TestCase):
+    def test_trusted_nick_valid_channel_executes_order(self):
+        order_fn = MagicMock()
+        h = make_order_handler(order_fn=order_fn)
+        h.handle(":sata!sata@host PRIVMSG TestBot :notes talk about quake 1")
+        order_fn.assert_called_once_with("sata", "#notes", "talk about quake 1")
+
+    def test_untrusted_nick_ignored(self):
+        order_fn = MagicMock()
+        h = make_order_handler(order_fn=order_fn)
+        h.handle(":stranger!stranger@host PRIVMSG TestBot :notes talk about something")
+        order_fn.assert_not_called()
+        h.irc.send.assert_not_called()
+
+    def test_invalid_channel_sends_pm_error(self):
+        order_fn = MagicMock()
+        h = make_order_handler(order_fn=order_fn)
+        h.handle(":sata!sata@host PRIVMSG TestBot :badchan talk about something")
+        order_fn.assert_not_called()
+        h.irc.send.assert_called_once()
+        sent = h.irc.send.call_args[0][0]
+        self.assertIn("PRIVMSG sata", sent)
+        self.assertIn("not in that channel", sent)
+
+    def test_channel_auto_prefixed_with_hash(self):
+        order_fn = MagicMock()
+        h = make_order_handler(order_fn=order_fn)
+        h.handle(":sata!sata@host PRIVMSG TestBot :notes talk about quake 1")
+        order_fn.assert_called_once_with("sata", "#notes", "talk about quake 1")
+
+    def test_nick_not_in_channel_silently_ignored(self):
+        order_fn = MagicMock()
+        # sata is not in #lupanar
+        h = make_order_handler(order_fn=order_fn, members={"#notes": {"other"}, "#lupanar": set()})
+        h.handle(":sata!sata@host PRIVMSG TestBot :notes talk about quake 1")
+        order_fn.assert_not_called()
+        h.irc.send.assert_not_called()
+
+    def test_missing_order_message_sends_usage_hint(self):
+        order_fn = MagicMock()
+        h = make_order_handler(order_fn=order_fn)
+        h.handle(":sata!sata@host PRIVMSG TestBot :notes")
+        order_fn.assert_not_called()
+        h.irc.send.assert_called_once()
+        sent = h.irc.send.call_args[0][0]
+        self.assertIn("Usage", sent)
+
+    def test_order_fn_none_is_noop(self):
+        h = make_order_handler(order_fn=None)
+        # Should not raise
+        h.handle(":sata!sata@host PRIVMSG TestBot :notes talk about something")
+        h.irc.send.assert_not_called()
 
 
 # ===========================================================================

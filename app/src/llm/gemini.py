@@ -40,6 +40,7 @@ class GeminiBackend(BaseLLMBackend):
         self.context.log_message(channel, username, message)
 
     def _summarize(self, prompt: str) -> str:
+        logger.info("LLM call: %s (summarize)", self.summarize_model_name)
         summary = self.client.models.generate_content(model=self.summarize_model_name, contents=prompt)
         return summary.text.strip()
 
@@ -80,8 +81,9 @@ class GeminiBackend(BaseLLMBackend):
 
         msg = f"<{username}> {question}"
         if ctx:
-            msg = f"[Channel context:\n{ctx}]\n\n{msg}"
+            msg = f"[Channel context (each bullet ends with [N] = age in updates; higher = older, less relevant):\n{ctx}]\n\n{msg}"
 
+        logger.info("LLM call: %s (%s)", self.model_name, channel)
         response = session.send_message(msg)
 
         for _ in range(3):  # max 3 tool calls
@@ -89,6 +91,7 @@ class GeminiBackend(BaseLLMBackend):
             if tool_result is None:
                 break
             logger.info("Tool call: %s → %s", response.text.strip(), tool_result)
+            logger.info("LLM call: %s (%s, tool follow-up)", self.model_name, channel)
             response = session.send_message(f"[Tool result: {tool_result}]")
 
         return self._extract_output(response.text)

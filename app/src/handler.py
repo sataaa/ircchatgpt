@@ -1,17 +1,76 @@
 import threading
+import logging
 from app.src.irc import IRCClient
+
+logger = logging.getLogger(__name__)
 
 
 class MessageHandler:
-    def __init__(self, irc_client: IRCClient, llm_client):
+    def __init__(self, irc_client: IRCClient, llm_client, order_fn=None):
         self.irc = irc_client
         self.llm = llm_client
         self.active_threads: set[str] = set()
+        self.order_fn = order_fn
 
     def send_typing_active(self, channel: str, stop_event):
       while not stop_event.is_set():
           self.irc.send(f"@+typing=active TAGMSG {channel}")
           stop_event.wait(5)
+
+    def _update_membership(self, line: str) -> None:
+        parts = line.split()
+        if len(parts) < 2:
+            return
+        action = parts[1]
+        nick = line.split('!')[0].split()[-1].lstrip(':')
+
+        if action == "JOIN" and len(parts) >= 3:
+            channel = parts[2].lstrip(':')
+            self.irc.members.setdefault(channel, set()).add(nick)
+
+        elif action == "PART" and len(parts) >= 3:
+            channel = parts[2]
+            self.irc.members.get(channel, set()).discard(nick)
+
+        elif action == "QUIT":
+            for channel_set in self.irc.members.values():
+                channel_set.discard(nick)
+
+        elif action == "KICK" and len(parts) >= 4:
+            channel = parts[2]
+            victim = parts[3]
+            self.irc.members.get(channel, set()).discard(victim)
+
+        elif action == "353" and len(parts) >= 5:
+            channel = parts[4]
+            nick_list = line.rsplit(':', 1)[1].split()
+            nick_set = self.irc.members.setdefault(channel, set())
+            for n in nick_list:
+                nick_set.add(n.lstrip('@+%~&'))
+
+    def _handle_pm_order(self, sender_nick: str, text: str) -> None:
+        if sender_nick.lower() not in self.irc.order_trusted_nicks:
+            return
+
+        if ' ' not in text:
+            self.irc.send(f"PRIVMSG {sender_nick} :Usage: <channel> <order message>")
+            return
+
+        raw_channel, order_msg = text.split(' ', 1)
+        channel = raw_channel if raw_channel.startswith('#') else '#' + raw_channel
+
+        if channel not in self.irc.channels:
+            self.irc.send(f"PRIVMSG {sender_nick} :I'm not in that channel. Usage: <channel> <order message>")
+            return
+
+        if not self.irc.channel_has_nick(channel, sender_nick):
+            return
+
+        if self.order_fn is None:
+            return
+
+        logger.info("PM order from %s for %s: %s", sender_nick, channel, order_msg)
+        self.order_fn(sender_nick, channel, order_msg)
 
     def handle(self, line: str):
         if line.startswith("PING"):
@@ -25,6 +84,8 @@ class MessageHandler:
             channel = line.split()[2]
             self.irc.send(f"JOIN {channel}")
             return
+
+        self._update_membership(line)
 
         if "PRIVMSG" not in line:
             return
@@ -48,6 +109,11 @@ class MessageHandler:
         log_channel = parts[channel_idx]
         log_username = line.split('!')[0].split()[-1].lstrip(':')
         msg_split = line.split(f"PRIVMSG {log_channel} :", 1)
+
+        if log_channel == self.irc.nickname:
+            if len(msg_split) > 1:
+                self._handle_pm_order(log_username, msg_split[1].strip())
+            return
 
         directly_addressed = f":{self.irc.nickname}:" in line
         in_bot_thread = reply_to is not None and reply_to in self.active_threads
@@ -94,9 +160,12 @@ class MessageHandler:
             while response:
                 if len(response) <= 392:
                     self.irc.send(f"{prefix}PRIVMSG {channel} :{response}")
+                    self.llm.log_channel_message(channel, self.irc.nickname, response)
                     break
                 split_idx = response[:392].rfind(" ")
                 if split_idx == -1:
                     split_idx = 392
-                self.irc.send(f"{prefix}PRIVMSG {channel} :{response[:split_idx]}")
+                chunk = response[:split_idx]
+                self.irc.send(f"{prefix}PRIVMSG {channel} :{chunk}")
+                self.llm.log_channel_message(channel, self.irc.nickname, chunk)
                 response = response[split_idx:].lstrip()

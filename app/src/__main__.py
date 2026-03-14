@@ -6,7 +6,9 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(message)s'
 )
+logging.getLogger("google_genai.models").setLevel(logging.WARNING)
 logging.getLogger("google_genai.client").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from app.src.bot import Bot
 
